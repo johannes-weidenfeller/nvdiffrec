@@ -2,7 +2,7 @@
     "ref_mesh": "data/nerd/moldGoldCape_rescaled",
     "random_textures": true,
     "iter": 5000,
-    "save_interval": 100,
+    "save_interval": 50,
     "texture_res": [ 2048, 2048 ],
     "train_res": [512, 512],
     "batch": 8,

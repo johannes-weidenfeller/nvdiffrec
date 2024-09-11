@@ -594,8 +594,15 @@ if __name__ == "__main__":
         if FLAGS.isosurface == 'flexicubes':
             geometry = FlexiCubesGeometry(FLAGS.dmtet_grid, FLAGS.mesh_scale, FLAGS)
         elif FLAGS.isosurface == 'dmtet':
-            geometry = DMTetGeometry(FLAGS.dmtet_grid, FLAGS.mesh_scale, FLAGS)
-        else: 
+            geometry = DMTetGeometry.from_regular_grid(FLAGS.dmtet_grid, FLAGS.mesh_scale, FLAGS)
+        elif FLAGS.isosurface == 'dmtet_preoptimized':
+            tets = np.load(FLAGS.initial_grid)
+            verts = tets['vertices']
+            indices = tets['indices']
+            sdf = tets['sdf']
+            max_deformation = 0.0 #FLAGS.max_deformation or FLAGS.mesh_scale/256.0;
+            geometry = DMTetGeometry(verts, indices, max_deformation, FLAGS, sdf)
+        else:
             assert False, "Invalid isosurfacing %s" % FLAGS.isosurface
 
         # Setup textures, make initial guess from reference if possible

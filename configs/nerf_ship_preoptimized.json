@@ -1,0 +1,31 @@
+{
+    "ref_mesh": "data/nerf_synthetic/ship",
+    "isosurface": "dmtet_preoptimized",
+    "initial_grid": "data/nerf_synthetic/ship/initial_grid.npz",
+    "random_textures": true,
+    "initial_optimization": {
+        "learning_rate": [0.03],
+        "iter": 5000,
+        "save_interval": 1,
+        "optimize_mesh": true,
+        "optimize_light": true,
+        "optimize_texture": true,
+        "max_grid_deformation": 0.001
+    },
+    "uv_optimization": {
+        "learning_rate": [0.03],
+        "iter": 5000,
+        "save_interval": 1
+    },
+    "texture_res": [ 2048, 2048 ],
+    "train_res": [800, 800],
+    "batch": 4,
+    "ks_min" : [0, 0.1, 0.0],
+    "dmtet_grid" : 128,
+    "mesh_scale" : 2.75,
+    "laplace_scale" : 3000,
+    "display": [{"latlong" : true}, {"bsdf" : "kd"}, {"bsdf" : "ks"}, {"bsdf" : "normal"}],
+    "layers" : 4,
+    "background" : "white",
+    "out_dir": "nerf_ship_preoptimized"
+}

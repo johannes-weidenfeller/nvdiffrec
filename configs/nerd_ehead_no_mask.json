@@ -1,8 +1,8 @@
 {
-    "ref_mesh": "data/nerd/ethiopianHead_rescaled",
+    "ref_mesh": "data/nerd/ethiopianHead_rescaled_no_mask",
     "random_textures": true,
     "iter": 5000,
-    "save_interval": 100,
+    "save_interval": 10,
     "texture_res": [ 2048, 2048 ],
     "train_res": [512, 512],
     "batch": 8,
@@ -16,5 +16,5 @@
     "camera_space_light" : true,
     "background" : "white",
     "display" : [{"bsdf":"kd"}, {"bsdf":"ks"}, {"bsdf" : "normal"}],
-    "out_dir": "nerd_ehead"
+    "out_dir": "nerd_ehead_no_mask"
 }

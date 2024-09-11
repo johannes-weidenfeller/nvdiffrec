@@ -156,31 +156,65 @@ def sdf_reg_loss(sdf, all_edges):
             torch.nn.functional.binary_cross_entropy_with_logits(sdf_f1x6x2[...,1], (sdf_f1x6x2[...,0] > 0).float())
     return sdf_diff
 
+
+
+
 ###############################################################################
 #  Geometry interface
 ###############################################################################
 
 class DMTetGeometry(torch.nn.Module):
-    def __init__(self, grid_res, scale, FLAGS):
+    # def __init__(self, grid_res, scale, FLAGS):
+    #     super(DMTetGeometry, self).__init__()
+    #
+    #     self.FLAGS         = FLAGS
+    #     self.grid_res      = grid_res
+    #     self.marching_tets = DMTet()
+    #
+    #     tets = np.load('data/tets/{}_tets.npz'.format(self.grid_res))
+    #     self.verts    = torch.tensor(tets['vertices'], dtype=torch.float32, device='cuda') * scale
+    #     self.indices  = torch.tensor(tets['indices'], dtype=torch.long, device='cuda')
+    #     self.generate_edges()
+    #
+    #     # Random init
+    #     sdf = torch.rand_like(self.verts[:,0]) - 0.1
+    #
+    #     self.sdf    = torch.nn.Parameter(sdf.clone().detach(), requires_grad=True)
+    #     self.register_parameter('sdf', self.sdf)
+    #
+    #     self.deform = torch.nn.Parameter(torch.zeros_like(self.verts), requires_grad=True)
+    #     self.register_parameter('deform', self.deform)
+
+
+    def __init__(self, verts, indices, max_deformation, FLAGS, sdf = None):
         super(DMTetGeometry, self).__init__()
 
         self.FLAGS         = FLAGS
-        self.grid_res      = grid_res
         self.marching_tets = DMTet()
-
-        tets = np.load('data/tets/{}_tets.npz'.format(self.grid_res))
-        self.verts    = torch.tensor(tets['vertices'], dtype=torch.float32, device='cuda') * scale
-        self.indices  = torch.tensor(tets['indices'], dtype=torch.long, device='cuda')
+        self.verts    = torch.tensor(verts, dtype=torch.float32, device='cuda')
+        self.indices  = torch.tensor(indices, dtype=torch.long, device='cuda')
+        self.max_deformation = max_deformation
         self.generate_edges()
 
-        # Random init
-        sdf = torch.rand_like(self.verts[:,0]) - 0.1
+        # Random init if sdf not provided
+        if (sdf is None):
+            sdf = torch.rand_like(self.verts[:,0]) - 0.1
+        else:
+            sdf = torch.tensor(sdf, dtype=torch.float32, device='cuda')
 
-        self.sdf    = torch.nn.Parameter(sdf.clone().detach(), requires_grad=True)
+        self.sdf = torch.nn.Parameter(sdf.clone().detach(), requires_grad=True)
         self.register_parameter('sdf', self.sdf)
 
         self.deform = torch.nn.Parameter(torch.zeros_like(self.verts), requires_grad=True)
         self.register_parameter('deform', self.deform)
+
+    @classmethod
+    def from_regular_grid(cls, grid_res, scale, FLAGS, sdf = None):
+        tets = np.load('data/tets/{}_tets.npz'.format(grid_res))
+        verts = tets['vertices'] * scale
+        indices = tets['indices']
+        max_deformation = 2 / (grid_res * 2) #Should we not multiply by scale here as well??
+        return cls(verts, indices, max_deformation, FLAGS, sdf)
 
     def generate_edges(self):
         with torch.no_grad():
@@ -195,7 +229,7 @@ class DMTetGeometry(torch.nn.Module):
 
     def getMesh(self, material):
         # Run DM tet to get a base mesh
-        v_deformed = self.verts + 2 / (self.grid_res * 2) * torch.tanh(self.deform)
+        v_deformed = self.verts + self.max_deformation * torch.tanh(self.deform)
         verts, faces, uvs, uv_idx = self.marching_tets(v_deformed, self.sdf, self.indices)
         imesh = mesh.Mesh(verts, faces, v_tex=uvs, t_tex_idx=uv_idx, material=material)
 
@@ -233,10 +267,10 @@ class DMTetGeometry(torch.nn.Module):
         reg_loss = sdf_reg_loss(self.sdf, self.all_edges).mean() * sdf_weight # Dropoff to 0.01
 
         # Albedo (k_d) smoothnesss regularizer
-        reg_loss += torch.mean(buffers['kd_grad'][..., :-1] * buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
+        reg_loss = reg_loss + torch.mean(buffers['kd_grad'][..., :-1] * buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
 
         # Visibility regularizer
-        reg_loss += torch.mean(buffers['occlusion'][..., :-1] * buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
+        reg_loss = reg_loss + torch.mean(buffers['occlusion'][..., :-1] * buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
 
         # Light white balance regularizer
         reg_loss = reg_loss + lgt.regularizer() * 0.005
