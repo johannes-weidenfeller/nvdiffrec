@@ -11,6 +11,7 @@ import os
 import time
 import argparse
 import json
+import wandb
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ import xatlas
 from dataset.dataset_mesh import DatasetMesh
 from dataset.dataset_nerf import DatasetNERF
 from dataset.dataset_llff import DatasetLLFF
+from configs.config import Config
 
 # Import topology / geometry trainers
 from geometry.dmtet import DMTetGeometry
@@ -36,6 +38,7 @@ from render import texture
 from render import mlptexture
 from render import light
 from render import render
+from configs.config import RunConfig
 
 RADIUS = 3.0
 
@@ -278,18 +281,15 @@ class Trainer(torch.nn.Module):
         self.geometry = geometry
         self.light = lgt
         self.material = mat
-        self.optimize_geometry = optimize_geometry
-        self.optimize_light = optimize_light
         self.image_loss_fn = image_loss_fn
         self.FLAGS = FLAGS
 
-        if not self.optimize_light:
-            with torch.no_grad():
-                self.light.build_mips()
+        with torch.no_grad():
+            self.light.build_mips()
 
         self.params = list(self.material.parameters())
-        self.params += list(self.light.parameters()) if optimize_light else []
-        self.geo_params = list(self.geometry.parameters()) if optimize_geometry else []
+        self.params += list(self.light.parameters())
+        self.geo_params = list(self.geometry.parameters())
 
     def forward(self, target, it):
         if self.optimize_light:
@@ -306,61 +306,40 @@ def optimize_mesh(
     lgt,
     dataset_train,
     dataset_validate,
+    optimization_parameters,  # This should be a dictionary
     FLAGS,
-    warmup_iter=0,
-    log_interval=10,
-    pass_idx=0,
-    pass_name="",
-    optimize_light=True,
-    optimize_geometry=True
+    log_interval=0,
+    pass_name=""
     ):
 
     # ==============================================================================================
     #  Setup torch optimizer
     # ==============================================================================================
 
-    learning_rate = FLAGS.learning_rate[pass_idx] if isinstance(FLAGS.learning_rate, list) or isinstance(FLAGS.learning_rate, tuple) else FLAGS.learning_rate
+    learning_rate = optimization_parameters['learning_rate']
     learning_rate_pos = learning_rate[0] if isinstance(learning_rate, list) or isinstance(learning_rate, tuple) else learning_rate
     learning_rate_mat = learning_rate[1] if isinstance(learning_rate, list) or isinstance(learning_rate, tuple) else learning_rate
 
+    warmup_iter = optimization_parameters['warmup_iter']
     def lr_schedule(iter, fraction):
         if iter < warmup_iter:
-            return iter / warmup_iter 
-        return max(0.0, 10**(-(iter - warmup_iter)*0.0002)) # Exponential falloff from [1.0, 0.1] over 5k epochs.    
+            return iter / warmup_iter
+        return max(0.0, 10**(-(iter - warmup_iter)*0.0002)) # Exponential falloff from [1.0, 0.1] over 5k epochs.
 
     # ==============================================================================================
     #  Image loss
     # ==============================================================================================
     image_loss_fn = createLoss(FLAGS)
 
-    trainer_noddp = Trainer(glctx, geometry, lgt, opt_material, optimize_geometry, optimize_light, image_loss_fn, FLAGS)
     if FLAGS.isosurface == 'flexicubes':
         betas = (0.7, 0.9)
     else:
         betas = (0.9, 0.999)
 
-    if FLAGS.multi_gpu: 
-        # Multi GPU training mode
-        import apex
-        from apex.parallel import DistributedDataParallel as DDP
-
-        trainer = DDP(trainer_noddp)
-        trainer.train()
-        if optimize_geometry:
-            optimizer_mesh = apex.optimizers.FusedAdam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
-            scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
-
-        optimizer = apex.optimizers.FusedAdam(trainer_noddp.params, lr=learning_rate_mat)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
-    else:
-        # Single GPU training mode
-        trainer = trainer_noddp
-        if optimize_geometry:
-            optimizer_mesh = torch.optim.Adam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
-            scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
-
-        optimizer = torch.optim.Adam(trainer_noddp.params, lr=learning_rate_mat)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
+    optimizer_mesh = torch.optim.Adam(list(geometry.parameters()), lr=learning_rate_pos, betas=betas)
+    scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9))
+    optimizer = torch.optim.Adam(list(opt_material.parameters()) + list(lgt.parameters()), lr=learning_rate_mat)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9))
 
     # ==============================================================================================
     #  Training loop
@@ -383,149 +362,139 @@ def optimize_mesh(
 
     v_it = cycle(dataloader_validate)
 
-    for it, target in enumerate(dataloader_train):
+    for pass_id in range(optimization_parameters['num_passes']):
+        optimize_geometry = optimization_parameters['optimize_geometry'][pass_id] if isinstance(
+            optimization_parameters['optimize_geometry'], list) or isinstance(optimization_parameters['optimize_geometry'],
+                                                                           tuple) else optimization_parameters['optimize_geometry']
+        optimize_light = optimization_parameters['optimize_light'][pass_id] if isinstance(
+            optimization_parameters['optimize_light'], list) or isinstance(optimization_parameters['optimize_light'],
+                                                                        tuple) else optimization_parameters['optimize_light']
+        optimize_material = optimization_parameters['optimize_material'][pass_id] if isinstance(
+            optimization_parameters['optimize_material'], list) or isinstance(optimization_parameters['optimize_material'],
+                                                                           tuple) else optimization_parameters['optimize_material']
+        num_iter = optimization_parameters['num_iter'][pass_id] if isinstance(optimization_parameters['num_iter'],
+                                                                           list) or isinstance(
+        optimization_parameters['num_iter'], tuple) else optimization_parameters['num_iter']
 
-        # Mix randomized background into dataset image
-        target = prepare_batch(target, 'random')
+        save_interval = optimization_parameters['save_interval'][pass_id] if isinstance(
+            optimization_parameters['save_interval'], list) or isinstance(optimization_parameters['save_interval'],
+                                                                       tuple) else optimization_parameters['save_interval']
 
-        # ==============================================================================================
-        #  Display / save outputs. Do it before training so we get initial meshes
-        # ==============================================================================================
+        display_interval = optimization_parameters['display_interval'][pass_id] if isinstance(
+            optimization_parameters['display_interval'], list) or isinstance(optimization_parameters['display_interval'],
+                                                                          tuple) else optimization_parameters['display_interval']
 
-        # Show/save image before training step (want to get correct rendering of input)
-        if FLAGS.local_rank == 0:
-            display_image = FLAGS.display_interval and (it % FLAGS.display_interval == 0)
-            save_image = FLAGS.save_interval and (it % FLAGS.save_interval == 0)
-            if display_image or save_image:
-                result_image, result_dict = validate_itr(glctx, prepare_batch(next(v_it), FLAGS.background), geometry, opt_material, lgt, FLAGS)
-                np_result_image = result_image.detach().cpu().numpy()
-                if display_image:
-                    util.display_image(np_result_image, title='%d / %d' % (it, FLAGS.iter))
-                if save_image:
-                    util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d.png' % (pass_name, img_cnt)), np_result_image)
-                    img_cnt = img_cnt+1
+        for it, target in enumerate(dataloader_train):
 
-        iter_start_time = time.time()
+            # Mix randomized background into dataset image
+            target = prepare_batch(target, 'random')
 
-        # ==============================================================================================
-        #  Zero gradients
-        # ==============================================================================================
-        optimizer.zero_grad()
-        if optimize_geometry:
-            optimizer_mesh.zero_grad()
+            # ==============================================================================================
+            #  Display / save outputs. Do it before training so we get initial meshes
+            # ==============================================================================================
 
-        # ==============================================================================================
-        #  Training
-        # ==============================================================================================
-        img_loss, reg_loss = trainer(target, it)
+            # Show/save image before training step (want to get correct rendering of input)
+            if FLAGS.local_rank == 0:
+                display_image = display_interval and (it % display_interval == 0)
+                save_image = save_interval and (it % save_interval == 0)
+                if display_image or save_image:
+                    result_image, result_dict = validate_itr(glctx, prepare_batch(next(v_it), FLAGS.background), geometry, opt_material, lgt, FLAGS)
+                    np_result_image = result_image.detach().cpu().numpy()
+                    if display_image:
+                        util.display_image(np_result_image, title='%d / %d' % (it, num_iter))
+                    if save_image:
+                        util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d.png' % (pass_name, img_cnt)), np_result_image)
+                        img_cnt = img_cnt+1
 
-        # ==============================================================================================
-        #  Final loss
-        # ==============================================================================================
-        total_loss = img_loss + reg_loss
+            iter_start_time = time.time()
 
-        img_loss_vec.append(img_loss.item())
-        reg_loss_vec.append(reg_loss.item())
+            # ==============================================================================================
+            #  Zero gradients
+            # ==============================================================================================
+            optimizer.zero_grad()
+            if optimize_geometry:
+                optimizer_mesh.zero_grad()
 
-        # ==============================================================================================
-        #  Backpropagate
-        # ==============================================================================================
-        total_loss.backward()
-        if hasattr(lgt, 'base') and lgt.base.grad is not None and optimize_light:
-            lgt.base.grad *= 64
-        if 'kd_ks_normal' in opt_material:
-            opt_material['kd_ks_normal'].encoder.params.grad /= 8.0
+            # ==============================================================================================
+            #  Training
+            # ==============================================================================================
+            if optimize_light:
+                lgt.build_mips()
+                if FLAGS.camera_space_light:
+                    lgt.xfm(target['mv'])
+            img_loss, reg_loss = geometry.tick(glctx, target, lgt, opt_material, image_loss_fn, it)
 
-        optimizer.step()
-        scheduler.step()
+            # ==============================================================================================
+            #  Final loss
+            # ==============================================================================================
+            total_loss = img_loss + reg_loss
 
-        if optimize_geometry:
-            optimizer_mesh.step()
-            scheduler_mesh.step()
+            img_loss_vec.append(img_loss.item())
+            reg_loss_vec.append(reg_loss.item())
 
-        # ==============================================================================================
-        #  Clamp trainables to reasonable range
-        # ==============================================================================================
-        with torch.no_grad():
-            if 'kd' in opt_material:
-                opt_material['kd'].clamp_()
-            if 'ks' in opt_material:
-                opt_material['ks'].clamp_()
-            if 'normal' in opt_material:
-                opt_material['normal'].clamp_()
-                opt_material['normal'].normalize_()
-            if lgt is not None:
-                lgt.clamp_(min=0.0)
+            # ==============================================================================================
+            #  Backpropagate
+            # ==============================================================================================
+            total_loss.backward()
+            if hasattr(lgt, 'base') and lgt.base.grad is not None and optimize_light:
+                lgt.base.grad *= 64
+            if 'kd_ks_normal' in opt_material:
+                opt_material['kd_ks_normal'].encoder.params.grad /= 8.0
 
-        torch.cuda.current_stream().synchronize()
-        iter_dur_vec.append(time.time() - iter_start_time)
+            optimizer.step()
+            scheduler.step()
 
-        # ==============================================================================================
-        #  Logging
-        # ==============================================================================================
-        if it % log_interval == 0 and FLAGS.local_rank == 0:
-            img_loss_avg = np.mean(np.asarray(img_loss_vec[-log_interval:]))
-            reg_loss_avg = np.mean(np.asarray(reg_loss_vec[-log_interval:]))
-            iter_dur_avg = np.mean(np.asarray(iter_dur_vec[-log_interval:]))
-            
-            remaining_time = (FLAGS.iter-it)*iter_dur_avg
-            print("iter=%5d, img_loss=%.6f, reg_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" % 
-                (it, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
+            if optimize_geometry:
+                optimizer_mesh.step()
+                scheduler_mesh.step()
+
+            # ==============================================================================================
+            #  Clamp trainables to reasonable range
+            # ==============================================================================================
+            with torch.no_grad():
+                if 'kd' in opt_material:
+                    opt_material['kd'].clamp_()
+                if 'ks' in opt_material:
+                    opt_material['ks'].clamp_()
+                if 'normal' in opt_material:
+                    opt_material['normal'].clamp_()
+                    opt_material['normal'].normalize_()
+                if lgt is not None:
+                    lgt.clamp_(min=0.0)
+
+            torch.cuda.current_stream().synchronize()
+            iter_dur_vec.append(time.time() - iter_start_time)
+
+            # ==============================================================================================
+            #  Logging
+            # ==============================================================================================
+            if it % log_interval == 0 and FLAGS.local_rank == 0:
+                img_loss_avg = np.mean(np.asarray(img_loss_vec[-log_interval:]))
+                reg_loss_avg = np.mean(np.asarray(reg_loss_vec[-log_interval:]))
+                iter_dur_avg = np.mean(np.asarray(iter_dur_vec[-log_interval:]))
+
+                remaining_time = (num_iter - it) * iter_dur_avg
+                print("iter=%5d, img_loss=%.6f, reg_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" %
+                    (it, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg * 1000, util.time_to_text(remaining_time)))
+
+            if it >= num_iter:
+                break
 
     return geometry, opt_material
 
-#----------------------------------------------------------------------------
-# Main function.
-#----------------------------------------------------------------------------
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='nvdiffrec')
     parser.add_argument('--config', type=str, default=None, help='Config file')
-    parser.add_argument('-i', '--iter', type=int, default=5000)
-    parser.add_argument('-b', '--batch', type=int, default=1)
-    parser.add_argument('-s', '--spp', type=int, default=1)
-    parser.add_argument('-l', '--layers', type=int, default=1)
-    parser.add_argument('-r', '--train-res', nargs=2, type=int, default=[512, 512])
-    parser.add_argument('-dr', '--display-res', type=int, default=None)
-    parser.add_argument('-tr', '--texture-res', nargs=2, type=int, default=[1024, 1024])
-    parser.add_argument('-di', '--display-interval', type=int, default=0)
-    parser.add_argument('-si', '--save-interval', type=int, default=1000)
-    parser.add_argument('-lr', '--learning-rate', type=float, default=0.01)
-    parser.add_argument('-mr', '--min-roughness', type=float, default=0.08)
-    parser.add_argument('-mip', '--custom-mip', action='store_true', default=False)
-    parser.add_argument('-rt', '--random-textures', action='store_true', default=False)
-    parser.add_argument('-bg', '--background', default='checker', choices=['black', 'white', 'checker', 'reference'])
-    parser.add_argument('--loss', default='logl1', choices=['logl1', 'logl2', 'mse', 'smape', 'relmse'])
-    parser.add_argument('-o', '--out-dir', type=str, default=None)
-    parser.add_argument('-rm', '--ref_mesh', type=str)
-    parser.add_argument('-bm', '--base-mesh', type=str, default=None)
-    parser.add_argument('--validate', type=bool, default=True)
-    parser.add_argument('--isosurface', default='dmtet', choices=['dmtet', 'flexicubes'])
-    
-    FLAGS = parser.parse_args()
 
-    FLAGS.mtl_override        = None                     # Override material of model
-    FLAGS.dmtet_grid          = 64                       # Resolution of initial tet grid. We provide 64 and 128 resolution grids. Other resolutions can be generated with https://github.com/crawforddoran/quartet
-    FLAGS.mesh_scale          = 2.1                      # Scale of tet grid box. Adjust to cover the model
-    FLAGS.env_scale           = 1.0                      # Env map intensity multiplier
-    FLAGS.envmap              = None                     # HDR environment probe
-    FLAGS.display             = None                     # Conf validation window/display. E.g. [{"relight" : <path to envlight>}]
-    FLAGS.camera_space_light  = False                    # Fixed light in camera space. This is needed for setups like ethiopian head where the scanned object rotates on a stand.
-    FLAGS.lock_light          = False                    # Disable light optimization in the second pass
-    FLAGS.lock_pos            = False                    # Disable vertex position optimization in the second pass
-    FLAGS.sdf_regularizer     = 0.2                      # Weight for sdf regularizer (see paper for details)
-    FLAGS.laplace             = "relative"               # Mesh Laplacian ["absolute", "relative"]
-    FLAGS.laplace_scale       = 10000.0                  # Weight for Laplacian regularizer. Default is relative with large weight
-    FLAGS.pre_load            = True                     # Pre-load entire dataset into memory for faster training
-    FLAGS.kd_min              = [ 0.0,  0.0,  0.0,  0.0] # Limits for kd
-    FLAGS.kd_max              = [ 1.0,  1.0,  1.0,  1.0]
-    FLAGS.ks_min              = [ 0.0, 0.08,  0.0]       # Limits for ks
-    FLAGS.ks_max              = [ 1.0,  1.0,  1.0]
-    FLAGS.nrm_min             = [-1.0, -1.0,  0.0]       # Limits for normal map
-    FLAGS.nrm_max             = [ 1.0,  1.0,  1.0]
-    FLAGS.cam_near_far        = [0.1, 1000.0]
-    FLAGS.learn_light         = True
+    args = parser.parse_args()
+    if args.config is not None:
+        FLAGS = RunConfig.from_json(args.config)
+    else:
+        FLAGS = RunConfig()
 
+    #Set up GPU config params
     FLAGS.local_rank = 0
     FLAGS.multi_gpu  = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
     if FLAGS.multi_gpu:
@@ -538,11 +507,8 @@ if __name__ == "__main__":
         torch.cuda.set_device(FLAGS.local_rank)
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
 
-    if FLAGS.config is not None:
-        data = json.load(open(FLAGS.config, 'r'))
-        for key in data:
-            FLAGS.__dict__[key] = data[key]
 
+    #Set up other default params
     if FLAGS.display_res is None:
         FLAGS.display_res = FLAGS.train_res
     if FLAGS.out_dir is None:
@@ -561,6 +527,14 @@ if __name__ == "__main__":
 
     glctx = dr.RasterizeGLContext()
 
+
+    # ==============================================================================================
+    #  Set up wandb logging
+    # ==============================================================================================
+    if FLAGS.local_rank == 0:
+        wandb.init(project='nvdiffrec', config=FLAGS.to_dict(), dir=FLAGS.out_dir)
+        wandb.run.name = os.path.basename(FLAGS.out_dir)
+
     # ==============================================================================================
     #  Create data pipeline
     # ==============================================================================================
@@ -570,10 +544,10 @@ if __name__ == "__main__":
         dataset_validate = DatasetMesh(ref_mesh, glctx, RADIUS, FLAGS, validate=True)
     elif os.path.isdir(FLAGS.ref_mesh):
         if os.path.isfile(os.path.join(FLAGS.ref_mesh, 'poses_bounds.npy')):
-            dataset_train    = DatasetLLFF(FLAGS.ref_mesh, FLAGS, examples=(FLAGS.iter+1)*FLAGS.batch)
+            dataset_train    = DatasetLLFF(FLAGS.ref_mesh, FLAGS, examples=50000)
             dataset_validate = DatasetLLFF(FLAGS.ref_mesh, FLAGS)
         elif os.path.isfile(os.path.join(FLAGS.ref_mesh, 'transforms_train.json')):
-            dataset_train    = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'), FLAGS, examples=(FLAGS.iter+1)*FLAGS.batch)
+            dataset_train    = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_train.json'), FLAGS, examples=50000)
             dataset_validate = DatasetNERF(os.path.join(FLAGS.ref_mesh, 'transforms_test.json'), FLAGS)
 
     # ==============================================================================================
@@ -600,17 +574,17 @@ if __name__ == "__main__":
             verts = tets['vertices']
             indices = tets['indices']
             sdf = tets['sdf']
-            max_deformation = 0.0 #FLAGS.max_deformation or FLAGS.mesh_scale/256.0;
+            max_deformation = FLAGS.max_grid_deformation #FLAGS.max_deformation or FLAGS.mesh_scale/256.0;
             geometry = DMTetGeometry(verts, indices, max_deformation, FLAGS, sdf)
         else:
             assert False, "Invalid isosurfacing %s" % FLAGS.isosurface
 
         # Setup textures, make initial guess from reference if possible
         mat = initial_guess_material(geometry, True, FLAGS)
-    
+
         # Run optimization
-        geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, 
-                        FLAGS, pass_idx=0, pass_name="dmtet_pass1", optimize_light=FLAGS.learn_light)
+        geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS.initial_optimization, FLAGS, pass_name = 'dmtet_pass', log_interval = 100)
+
 
         if FLAGS.local_rank == 0 and FLAGS.validate:
             validate(glctx, geometry, mat, lgt, dataset_validate, os.path.join(FLAGS.out_dir, "dmtet_validate"), FLAGS)
@@ -635,28 +609,24 @@ if __name__ == "__main__":
         # ==============================================================================================
         #  Pass 2: Train with fixed topology (mesh)
         # ==============================================================================================
-        geometry, mat = optimize_mesh(glctx, geometry, base_mesh.material, lgt, dataset_train, dataset_validate, FLAGS, 
-                    pass_idx=1, pass_name="mesh_pass", warmup_iter=100, optimize_light=FLAGS.learn_light and not FLAGS.lock_light, 
-                    optimize_geometry=not FLAGS.lock_pos)
+        geometry, mat = optimize_mesh(glctx, geometry, base_mesh.material, lgt, dataset_train, dataset_validate, FLAGS.uv_optimization, FLAGS, pass_name = 'material_pass', log_interval = 100)
     else:
         # ==============================================================================================
         #  Train with fixed topology (mesh)
         # ==============================================================================================
-
         # Load initial guess mesh from file
         base_mesh = mesh.load_mesh(FLAGS.base_mesh)
         geometry = DLMesh(base_mesh, FLAGS)
         
         mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
 
-        geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS, pass_idx=0, pass_name="mesh_pass", 
-                                        warmup_iter=100, optimize_light=not FLAGS.lock_light, optimize_geometry=not FLAGS.lock_pos)
-
+        geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS.uv_optimization, FLAGS,  pass_name="material_pass", log_interval = 100)
     # ==============================================================================================
     #  Validate
     # ==============================================================================================
     if FLAGS.validate and FLAGS.local_rank == 0:
         validate(glctx, geometry, mat, lgt, dataset_validate, os.path.join(FLAGS.out_dir, "validate"), FLAGS)
+
 
     # ==============================================================================================
     #  Dump output

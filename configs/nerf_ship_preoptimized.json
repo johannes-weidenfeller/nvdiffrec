@@ -3,17 +3,21 @@
     "isosurface": "dmtet_preoptimized",
     "initial_grid": "data/nerf_synthetic/ship/initial_grid.npz",
     "random_textures": true,
+    "max_grid_deformation": 0.0,
     "initial_optimization": {
-        "learning_rate": [0.03],
-        "iter": 5000,
-        "save_interval": 1,
-        "optimize_mesh": true,
+        "num_passes": 2,
+        "num_iter": [100, 1000],
+        "warmup_iter": 100,
+        "learning_rate": [0.005, 0.03],
+        "save_interval": 50,
+        "display_interval": 0,
+        "optimize_geometry": [true,true],
         "optimize_light": true,
-        "optimize_texture": true,
-        "max_grid_deformation": 0.001
+        "optimize_material": true
     },
     "uv_optimization": {
-        "learning_rate": [0.03],
+        "num_passes": 1,
+        "learning_rate": 0.03,
         "iter": 5000,
         "save_interval": 1
     },
@@ -27,5 +31,5 @@
     "display": [{"latlong" : true}, {"bsdf" : "kd"}, {"bsdf" : "ks"}, {"bsdf" : "normal"}],
     "layers" : 4,
     "background" : "white",
-    "out_dir": "nerf_ship_preoptimized"
+    "out_dir": "nerf_ship_preoptimized_warmup_lr_0.005_sdf_consistency"
 }

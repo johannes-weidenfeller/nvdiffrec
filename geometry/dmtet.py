@@ -245,6 +245,12 @@ class DMTetGeometry(torch.nn.Module):
                                         msaa=True, background=target['background'], bsdf=bsdf)
 
 
+    def sdf_consistency_loss(self):
+        squared_edge_distances = ((self.verts[self.all_edges[:,0]]-self.verts[self.all_edges[:,1]])**2).sum(axis = 1)
+        squared_sdf_distances = (self.sdf[self.all_edges[:,0]]-self.sdf[self.all_edges[:,1]])**2
+        sdf_consistency_loss = torch.maximum(squared_sdf_distances - squared_edge_distances, torch.tensor(0.0)).sum()/self.all_edges.shape[0]
+        return sdf_consistency_loss
+
     def tick(self, glctx, target, lgt, opt_material, loss_fn, iteration):
 
         # ==============================================================================================
@@ -265,6 +271,9 @@ class DMTetGeometry(torch.nn.Module):
         # SDF regularizer
         sdf_weight = self.FLAGS.sdf_regularizer - (self.FLAGS.sdf_regularizer - 0.01)*min(1.0, 4.0 * t_iter)
         reg_loss = sdf_reg_loss(self.sdf, self.all_edges).mean() * sdf_weight # Dropoff to 0.01
+
+        # SDF consistency loss
+        reg_loss = reg_loss + self.sdf_consistency_loss() * 0.03
 
         # Albedo (k_d) smoothnesss regularizer
         reg_loss = reg_loss + torch.mean(buffers['kd_grad'][..., :-1] * buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)

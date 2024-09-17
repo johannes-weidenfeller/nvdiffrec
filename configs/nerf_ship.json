@@ -2,11 +2,32 @@
     "ref_mesh": "data/nerf_synthetic/ship",
     "random_textures": true,
     "iter": 5000,
-    "save_interval": 100,
+    "initial_optimization": {
+        "num_passes": 1,
+        "num_iter": 5000,
+        "warmup_iter": 100,
+        "learning_rate": 0.03,
+        "save_interval": 50,
+        "display_interval": 0,
+        "optimize_geometry": true,
+        "optimize_light": true,
+        "optimize_material": true
+    },
+    "uv_optimization": {
+        "num_passes": 1,
+        "num_iter": 5000,
+        "wamup_iter": 100,
+        "learning_rate": 0.01,
+        "iter": 5000,
+        "save_interval": 100,
+        "display_interval": 0,
+        "optimize_geometry": false,
+        "optimize_light": true,
+        "optimize_material": true
+    },
     "texture_res": [ 2048, 2048 ],
     "train_res": [800, 800],
     "batch": 8,
-    "learning_rate": [0.03, 0.01],
     "ks_min" : [0, 0.1, 0.0],
     "dmtet_grid" : 128,
     "mesh_scale" : 2.75,
@@ -14,5 +35,5 @@
     "display": [{"latlong" : true}, {"bsdf" : "kd"}, {"bsdf" : "ks"}, {"bsdf" : "normal"}],
     "layers" : 4,
     "background" : "white",
-    "out_dir": "nerf_ship"
+    "out_dir": "nerf_ship_sdf_consistency_0.03"
 }
