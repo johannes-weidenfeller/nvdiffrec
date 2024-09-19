@@ -484,15 +484,7 @@ def optimize_mesh(
 
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='nvdiffrec')
-    parser.add_argument('--config', type=str, default=None, help='Config file')
-
-    args = parser.parse_args()
-    if args.config is not None:
-        FLAGS = RunConfig.from_json(args.config)
-    else:
-        FLAGS = RunConfig()
+def main(FLAGS):
 
     #Set up GPU config params
     FLAGS.local_rank = 0
@@ -553,7 +545,7 @@ if __name__ == "__main__":
     # ==============================================================================================
     #  Create env light with trainable parameters
     # ==============================================================================================
-    
+
     if FLAGS.learn_light:
         lgt = light.create_trainable_env_rnd(512, scale=0.0, bias=0.5)
     else:
@@ -592,7 +584,7 @@ if __name__ == "__main__":
         # Create textured mesh from result
         base_mesh = xatlas_uvmap(glctx, geometry, mat, FLAGS)
 
-        # Free temporaries / cached memory 
+        # Free temporaries / cached memory
         torch.cuda.empty_cache()
         mat['kd_ks_normal'].cleanup()
         del mat['kd_ks_normal']
@@ -617,7 +609,7 @@ if __name__ == "__main__":
         # Load initial guess mesh from file
         base_mesh = mesh.load_mesh(FLAGS.base_mesh)
         geometry = DLMesh(base_mesh, FLAGS)
-        
+
         mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
 
         geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS.uv_optimization, FLAGS,  pass_name="material_pass", log_interval = 100)
@@ -638,3 +630,16 @@ if __name__ == "__main__":
         light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt)
 
 #----------------------------------------------------------------------------
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='nvdiffrec')
+    parser.add_argument('--config', type=str, default=None, help='Config file')
+
+    args = parser.parse_args()
+    if args.config is not None:
+        FLAGS = RunConfig.from_json(args.config)
+    else:
+        FLAGS = RunConfig()
+
+    main(FLAGS)

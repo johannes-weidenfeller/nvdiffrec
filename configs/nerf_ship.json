@@ -2,29 +2,33 @@
     "ref_mesh": "data/nerf_synthetic/ship",
     "random_textures": true,
     "iter": 5000,
-    "initial_optimization": {
-        "num_passes": 1,
-        "num_iter": 5000,
-        "warmup_iter": 100,
-        "learning_rate": 0.03,
-        "save_interval": 50,
-        "display_interval": 0,
-        "optimize_geometry": true,
-        "optimize_light": true,
-        "optimize_material": true
-    },
-    "uv_optimization": {
-        "num_passes": 1,
-        "num_iter": 5000,
-        "wamup_iter": 100,
-        "learning_rate": 0.01,
-        "iter": 5000,
-        "save_interval": 100,
-        "display_interval": 0,
-        "optimize_geometry": false,
-        "optimize_light": true,
-        "optimize_material": true
-    },
+    "optimization_passes": [
+        {
+            "num_iter": 5000,
+            "batch": 8,
+            "warmup_iter": 100,
+            "learning_rate": 0.03,
+            "save_interval": 50,
+            "display_interval": 0,
+            "optimize_geometry": true,
+            "optimize_light": true,
+            "optimize_material": true
+        }
+    ],
+    "texture_optimization_passes": [
+        {
+            "num_iter": 5000,
+            "batch": 8,
+            "wamup_iter": 100,
+            "learning_rate": 0.01,
+            "iter": 5000,
+            "save_interval": 100,
+            "display_interval": 0,
+            "optimize_geometry": false,
+            "optimize_light": true,
+            "optimize_material": true
+        }
+    ],
     "texture_res": [ 2048, 2048 ],
     "train_res": [800, 800],
     "batch": 8,
